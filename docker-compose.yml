@@ -1,0 +1,76 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  # SQS-API-compatible queue. Code uses the AWS SQS SDK against this endpoint;
+  # swapping SQS_ENDPOINT for a real AWS URL is the only change needed to run on AWS.
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.5.7
+    ports:
+      - "9324:9324"   # SQS API
+      - "9325:9325"   # web UI
+
+  node-red:
+    image: nodered/node-red:4.0
+    ports:
+      - "1880:1880"
+    volumes:
+      - nodered-data:/data
+    depends_on:
+      - mosquitto
+      - mongo
+
+  ingest:
+    build: ./services/ingest
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      MONGO_URL: mongodb://mongo:27017/fleet
+      PORT: "3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mosquitto
+      - mongo
+
+  dispatch:
+    build: ./services/dispatch
+    environment:
+      MONGO_URL: mongodb://mongo:27017/fleet
+      MQTT_URL: mqtt://mosquitto:1883
+      SQS_ENDPOINT: http://elasticmq:9324
+      SQS_QUEUE: http://elasticmq:9324/000000000000/rider-requests
+      AWS_REGION: elasticmq
+      AWS_ACCESS_KEY_ID: x
+      AWS_SECRET_ACCESS_KEY: x
+      PORT: "3002"
+    ports:
+      - "3002:3002"
+    depends_on:
+      - mongo
+      - elasticmq
+      - mosquitto
+
+  dashboard:
+    build: ./dashboard
+    environment:
+      MONGO_URL: mongodb://mongo:27017/fleet
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:
+  nodered-data:

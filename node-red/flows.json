@@ -1,0 +1,21 @@
+[
+  { "id": "tab-fleet", "type": "tab", "label": "Telemetry Validation & Alert Routing", "disabled": false },
+
+  { "id": "broker-mosq", "type": "mqtt-broker", "name": "mosquitto", "broker": "mosquitto", "port": "1883", "clientid": "", "keepalive": "60", "cleansession": true },
+
+  { "id": "mqtt-in", "type": "mqtt in", "z": "tab-fleet", "name": "vehicle telemetry", "topic": "fleet/telemetry/#", "qos": "0", "datatype": "auto", "broker": "broker-mosq", "x": 140, "y": 160, "wires": [["json-parse"]] },
+
+  { "id": "json-parse", "type": "json", "z": "tab-fleet", "name": "parse JSON", "property": "payload", "action": "obj", "x": 330, "y": 160, "wires": [["fn-validate"]] },
+
+  { "id": "fn-validate", "type": "function", "z": "tab-fleet", "name": "schema validation", "func": "const t = msg.payload || {};\nconst ok = t.vehicleId && t.location && Array.isArray(t.location.coordinates)\n  && typeof t.soc === 'number' && t.status;\nmsg.valid = !!ok;\nreturn msg;", "outputs": 1, "x": 540, "y": 160, "wires": [["sw-valid"]] },
+
+  { "id": "sw-valid", "type": "switch", "z": "tab-fleet", "name": "valid?", "property": "valid", "propertyType": "msg", "rules": [ { "t": "true" }, { "t": "false" } ], "outputs": 2, "x": 730, "y": 160, "wires": [["fn-alerts"], ["dbg-invalid"]] },
+
+  { "id": "fn-alerts", "type": "function", "z": "tab-fleet", "name": "classify alerts", "func": "const t = msg.payload;\nlet alert = null;\nif (t.soc < 15) alert = { type: 'low_battery', severity: 'warning' };\nif (t.status === 'fault') alert = { type: 'safety_fault', severity: 'critical' };\nif (!alert) return [msg, null];\nmsg.payload = { vehicleId: t.vehicleId, ...alert, timestamp: new Date().toISOString() };\nmsg.topic = 'fleet/alerts/' + t.vehicleId;\nreturn [null, msg];", "outputs": 2, "x": 930, "y": 160, "wires": [["dbg-valid"], ["mqtt-alerts", "dbg-alert"]] },
+
+  { "id": "mqtt-alerts", "type": "mqtt out", "z": "tab-fleet", "name": "route alert", "topic": "", "qos": "0", "retain": "", "broker": "broker-mosq", "x": 1160, "y": 120, "wires": [] },
+
+  { "id": "dbg-valid", "type": "debug", "z": "tab-fleet", "name": "valid telemetry", "active": true, "console": false, "complete": "false", "x": 1160, "y": 200, "wires": [] },
+  { "id": "dbg-alert", "type": "debug", "z": "tab-fleet", "name": "alert raised", "active": true, "complete": "payload", "x": 1150, "y": 160, "wires": [] },
+  { "id": "dbg-invalid", "type": "debug", "z": "tab-fleet", "name": "rejected (bad schema)", "active": true, "complete": "false", "x": 940, "y": 260, "wires": [] }
+]

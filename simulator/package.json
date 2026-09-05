@@ -1,0 +1,13 @@
+{
+  "name": "fleet-simulator",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Simulated driverless-taxi fleet: N vehicles publishing telemetry over MQTT, plus a rider load generator.",
+  "scripts": {
+    "start": "node simulator.js",
+    "riders": "node rider-load.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  }
+}

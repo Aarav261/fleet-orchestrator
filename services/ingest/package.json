@@ -1,0 +1,12 @@
+{
+  "name": "telemetry-ingest",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Subscribes to vehicle telemetry over MQTT, persists to MongoDB, raises alerts, exposes metrics.",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mongodb": "^6.12.0",
+    "mqtt": "^5.10.1"
+  }
+}
