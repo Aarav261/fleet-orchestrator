@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:us-east-1:203377390456:client/${iot:Connection.Thing.ThingName}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:us-east-1:203377390456:topic/fleet/telemetry/${iot:Connection.Thing.ThingName}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/dispatch/${iot:Connection.Thing.ThingName}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:us-east-1:203377390456:topic/fleet/dispatch/${iot:Connection.Thing.ThingName}"
+    }
+  ]
+}

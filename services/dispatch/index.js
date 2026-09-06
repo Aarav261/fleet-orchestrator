@@ -14,9 +14,20 @@ import {
   SQSClient, CreateQueueCommand, SendMessageCommand,
   ReceiveMessageCommand, DeleteMessageCommand, GetQueueAttributesCommand,
 } from "@aws-sdk/client-sqs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// AWS IoT Core (mTLS) — the only broker. svc-dispatch backend cert; FleetBackendPolicy permits
+// publishing dispatch commands to fleet/dispatch/*.
+const IOT_ENDPOINT = process.env.IOT_ENDPOINT;
+const IOT_CERT_DIR = process.env.IOT_CERT_DIR || path.resolve(__dirname, "../../infra/iot/certs");
+const CLIENT_ID = process.env.IOT_CLIENT_ID || "svc-dispatch";
+if (!IOT_ENDPOINT) { console.error("[dispatch] IOT_ENDPOINT is required (AWS IoT Core data endpoint)"); process.exit(1); }
 
 const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/fleet";
-const MQTT_URL = process.env.MQTT_URL || "mqtt://localhost:1883";
 const SQS_ENDPOINT = process.env.SQS_ENDPOINT || "http://localhost:9324";
 const AWS_REGION = process.env.AWS_REGION || "elasticmq";
 const PORT = parseInt(process.env.PORT || "3002", 10);
@@ -40,8 +51,15 @@ const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: "rider-r
 const QUEUE_URL = QueueUrl;
 console.log(`[dispatch ${INSTANCE}] queue ${QUEUE_URL}`);
 
-const mqttClient = mqtt.connect(MQTT_URL, { reconnectPeriod: 2000 });
-mqttClient.on("connect", () => console.log(`[dispatch ${INSTANCE}] mqtt connected`));
+const mqttClient = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
+  clientId: CLIENT_ID,
+  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.cert.pem`)),
+  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.private.key`)),
+  ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
+  reconnectPeriod: 2000,
+});
+mqttClient.on("connect", () => console.log(`[dispatch ${INSTANCE}] mqtt connected via IoT Core`));
+mqttClient.on("error", (e) => console.error("[dispatch] mqtt error:", e.message));
 
 // --- metrics ---
 let enqueued = 0, matched = 0, unmatched = 0, errors = 0, queueDepth = 0;

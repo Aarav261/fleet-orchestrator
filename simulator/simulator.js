@@ -6,21 +6,34 @@
 //   EDGE_FILTER=on|off toggle edge filtering         (edge-filter efficiency test)
 //
 // Env:
-//   MQTT_URL   default mqtt://localhost:1883
+//   IOT_ENDPOINT  AWS IoT Core data endpoint (required) — the only broker, no local Mosquitto
+//   IOT_CERT_DIR  per-vehicle certs dir (default ../infra/iot/certs)
 //   N          default 50
 //   RATE_MS    telemetry tick interval, default 1000 (1 Hz)
 //   EDGE_FILTER on (default) | off
 //   CITY_LAT / CITY_LON  map centre (default Melbourne CBD)
 
 import mqtt from "mqtt";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const MQTT_URL = process.env.MQTT_URL || "mqtt://localhost:1883";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const N = parseInt(process.env.N || "50", 10);
 const RATE_MS = parseInt(process.env.RATE_MS || "1000", 10);
 const EDGE_FILTER = (process.env.EDGE_FILTER || "on") !== "off";
 const DURATION_S = parseInt(process.env.DURATION_S || "0", 10); // 0 = run forever
 const CITY_LAT = parseFloat(process.env.CITY_LAT || "-37.8136");
 const CITY_LON = parseFloat(process.env.CITY_LON || "144.9631");
+
+// AWS IoT Core is the only broker. Each vehicle connects over per-vehicle mTLS (one client per
+// vehicle, each authenticating with its own X.509 cert from provision-vehicles.js).
+// ponytail: one TLS connection per vehicle is fine for the security demo / a few hundred vehicles;
+// for large-N ingest load use a shared load-test cert.
+const IOT_ENDPOINT = process.env.IOT_ENDPOINT;
+const IOT_CERT_DIR = process.env.IOT_CERT_DIR || path.resolve(__dirname, "../infra/iot/certs");
+if (!IOT_ENDPOINT) { console.error("[sim] IOT_ENDPOINT is required (AWS IoT Core data endpoint)"); process.exit(1); }
 
 // ~0.05 deg box around the city centre (~5.5 km)
 const SPAN = 0.05;
@@ -106,41 +119,64 @@ class Vehicle {
 
 const round = (x) => Math.round(x * 1e5) / 1e5;
 
-const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 2000 });
 const vehicles = Array.from({ length: N }, (_, i) => new Vehicle(`veh-${String(i).padStart(4, "0")}`));
+
+// Transport: AWS IoT Core, one per-vehicle mTLS client (policy binds clientId -> Thing name).
+const ca = fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem"));
+for (const v of vehicles) {
+  const certFile = path.join(IOT_CERT_DIR, `${v.id}.cert.pem`);
+  const keyFile = path.join(IOT_CERT_DIR, `${v.id}.private.key`);
+  if (!fs.existsSync(certFile)) {
+    console.error(`[sim] missing cert for ${v.id} in ${IOT_CERT_DIR}\n      run: node infra/iot/provision-vehicles.js ${N}`);
+    process.exit(1);
+  }
+  v.client = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
+    clientId: v.id, ca,
+    cert: fs.readFileSync(certFile),
+    key: fs.readFileSync(keyFile),
+    reconnectPeriod: 2000,
+  });
+  v.client.on("error", (e) => console.error(`[sim] ${v.id} error: ${e.message}`));
+}
 
 let ticks = 0, generated = 0, published = 0, bytes = 0;
 
-client.on("connect", () => {
-  console.log(`[sim] connected ${MQTT_URL} | N=${N} rate=${RATE_MS}ms edgeFilter=${EDGE_FILTER ? "on" : "off"}`);
-  if (DURATION_S > 0) setTimeout(dump, DURATION_S * 1000); // clean self-exit for experiments
-  setInterval(() => {
-    const now = Date.now();
-    for (const v of vehicles) {
-      v.step();
-      generated++;
-      const p = v.filtered(now);
-      if (p) {
-        const msg = JSON.stringify(p);
-        client.publish(`fleet/telemetry/${v.id}`, msg, { qos: 0 });
-        published++; bytes += msg.length;
-      }
-    }
-    ticks++;
-    if (ticks % 10 === 0) {
-      const supp = generated ? (100 * (1 - published / generated)).toFixed(1) : "0";
-      console.log(`[sim] t=${ticks}s generated=${generated} published=${published} suppressed=${supp}% bytes=${bytes}`);
-    }
-  }, RATE_MS);
-});
+const tick = () => {
+  const now = Date.now();
+  for (const v of vehicles) {
+    v.step();
+    generated++;
+    const p = v.filtered(now);
+    if (!p) continue;
+    if (!v.client.connected) continue; // skip while (re)connecting; QoS 0, no buffering
+    const msg = JSON.stringify(p);
+    v.client.publish(`fleet/telemetry/${v.id}`, msg, { qos: 0 });
+    published++; bytes += msg.length;
+  }
+  ticks++;
+  if (ticks % 10 === 0) {
+    const supp = generated ? (100 * (1 - published / generated)).toFixed(1) : "0";
+    console.log(`[sim] t=${ticks}s generated=${generated} published=${published} suppressed=${supp}% bytes=${bytes}`);
+  }
+};
 
-client.on("error", (e) => console.error("[sim] mqtt error:", e.message));
+const start = () => {
+  console.log(`[sim] IoT Core ${IOT_ENDPOINT} (per-vehicle mTLS) | N=${N} rate=${RATE_MS}ms edgeFilter=${EDGE_FILTER ? "on" : "off"}`);
+  if (DURATION_S > 0) setTimeout(dump, DURATION_S * 1000); // clean self-exit for experiments
+  setInterval(tick, RATE_MS);
+};
+
+// Start once the first vehicle client connects (others join shortly; per-vehicle connected
+// checks gate each publish).
+let started = false;
+const startOnce = () => { if (!started) { started = true; start(); } };
+vehicles.forEach((v) => v.client.on("connect", startOnce));
 
 // Emit a metrics line on exit so experiments can capture edge-filter savings.
-const dump = () => {
+function dump() {
   const supp = generated ? (1 - published / generated) : 0;
   console.log(JSON.stringify({ metric: "sim", N, edgeFilter: EDGE_FILTER, ticks, generated, published, bytes, suppressedPct: +(100 * supp).toFixed(2) }));
   process.exit(0);
-};
+}
 process.on("SIGINT", dump);
 process.on("SIGTERM", dump);

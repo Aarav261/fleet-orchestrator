@@ -6,6 +6,9 @@ node_modules/
 .env.*
 !.env.example
 
+# IoT Core X.509 private keys / certs
+infra/iot/certs/
+
 # Logs
 *.log
 npm-debug.log*

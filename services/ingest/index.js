@@ -9,8 +9,19 @@ import "dotenv/config";
 import express from "express";
 import mqtt from "mqtt";
 import { MongoClient } from "mongodb";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const MQTT_URL = process.env.MQTT_URL || "mqtt://localhost:1883";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// AWS IoT Core (mTLS) — the only broker. Connects with the svc-ingest backend cert, whose policy
+// (FleetBackendPolicy) permits the fleet/telemetry/# wildcard subscribe.
+const IOT_ENDPOINT = process.env.IOT_ENDPOINT;
+const IOT_CERT_DIR = process.env.IOT_CERT_DIR || path.resolve(__dirname, "../../infra/iot/certs");
+const CLIENT_ID = process.env.IOT_CLIENT_ID || "svc-ingest";
+if (!IOT_ENDPOINT) { console.error("[ingest] IOT_ENDPOINT is required (AWS IoT Core data endpoint)"); process.exit(1); }
+
 const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/fleet";
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const INSTANCE = process.env.HOSTNAME || "ingest-local";
@@ -41,10 +52,16 @@ setInterval(async () => {
   catch (e) { errors++; console.error("[ingest] bulk insert error:", e.message); }
 }, 1000);
 
-const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 2000 });
+const client = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
+  clientId: CLIENT_ID,
+  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.cert.pem`)),
+  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.private.key`)),
+  ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
+  reconnectPeriod: 2000,
+});
 client.on("connect", () => {
   client.subscribe("fleet/telemetry/#", (err) => {
-    console.log(err ? `[ingest] subscribe error ${err.message}` : `[ingest ${INSTANCE}] subscribed fleet/telemetry/#`);
+    console.log(err ? `[ingest] subscribe error ${err.message}` : `[ingest ${INSTANCE}] subscribed fleet/telemetry/# via IoT Core`);
   });
 });
 client.on("error", (e) => console.error("[ingest] mqtt error:", e.message));
