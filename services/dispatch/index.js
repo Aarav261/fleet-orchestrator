@@ -6,6 +6,7 @@
 // Scales with RIDER DEMAND. Autoscaling trigger = SQS queue depth (exposed at /metrics).
 // Every replica is a competing consumer on the same queue, so scaling out = more throughput.
 
+import "dotenv/config";
 import express from "express";
 import { MongoClient } from "mongodb";
 import mqtt from "mqtt";

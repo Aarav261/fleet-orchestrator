@@ -5,6 +5,7 @@
 // Scales with FLEET SIZE. In the plan its autoscaling trigger is message volume;
 // the /metrics msgsPerSec below is exactly that signal.
 
+import "dotenv/config";
 import express from "express";
 import mqtt from "mqtt";
 import { MongoClient } from "mongodb";

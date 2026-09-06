@@ -1,7 +1,0 @@
-{
-  "name": "experiments",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "Scalability experiment harness for the fleet orchestration platform.",
-  "scripts": { "all": "node run.js all" }
-}
