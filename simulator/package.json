@@ -4,10 +4,11 @@
   "type": "module",
   "description": "Simulated driverless-taxi fleet: N vehicles publishing telemetry over MQTT, plus a rider load generator.",
   "scripts": {
-    "start": "node simulator.js",
+    "start": "node fleet-simulator.js",
     "riders": "node rider-load.js"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "mqtt": "^5.10.1"
   }
 }

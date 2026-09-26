@@ -1,29 +1,24 @@
-// Telemetry Ingest service.
-// Subscribes to fleet/telemetry/#, upserts live vehicle state + appends telemetry,
-// raises alerts (low battery / fault), and exposes /metrics for autoscaling.
+// Telemetry Ingest service. Subscribes to fleet/telemetry/#, appends each reading to the
+// telemetry log, keeps live vehicle state current, and raises alerts (low battery / fault).
 //
-// Scales with FLEET SIZE. In the plan its autoscaling trigger is message volume;
-// the /metrics msgsPerSec below is exactly that signal.
-
+// Scales with FLEET SIZE: autoscale on message volume (/metrics msgsPerSec is that signal).
+//
+// All config comes from the root .env (no in-code defaults); CLI overrides still win.
 import "dotenv/config";
 import express from "express";
 import mqtt from "mqtt";
 import { MongoClient } from "mongodb";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// AWS IoT Core (mTLS) — the only broker. Connects with the svc-ingest backend cert, whose policy
-// (FleetBackendPolicy) permits the fleet/telemetry/# wildcard subscribe.
-const IOT_ENDPOINT = process.env.IOT_ENDPOINT;
-const IOT_CERT_DIR = process.env.IOT_CERT_DIR || path.resolve(__dirname, "../../infra/iot/certs");
-const CLIENT_ID = process.env.IOT_CLIENT_ID || "svc-ingest";
-if (!IOT_ENDPOINT) { console.error("[ingest] IOT_ENDPOINT is required (AWS IoT Core data endpoint)"); process.exit(1); }
-
-const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/fleet";
-const PORT = parseInt(process.env.PORT || "3001", 10);
+// IoT Core client id = fixed service identity (must match the cert file name). The svc-ingest
+// cert's policy (FleetBackendPolicy) allows the fleet/telemetry/# wildcard subscribe.
+const CLIENT_ID = "svc-ingest";
+const { IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT } = process.env;
+for (const [k, v] of Object.entries({ IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT })) {
+  if (!v) { console.error(`[ingest] ${k} is required — set it in .env`); process.exit(1); }
+}
+const PORT = parseInt(INGEST_PORT, 10);
 const INSTANCE = process.env.HOSTNAME || "ingest-local";
 
 const mongo = new MongoClient(MONGO_URL);
@@ -43,7 +38,7 @@ let window = 0; // messages in the current 1 s window
 let msgsPerSec = 0;
 setInterval(() => { msgsPerSec = window; window = 0; }, 1000);
 
-// buffer telemetry writes to avoid one insert per message under load
+// Batch telemetry writes once a second, not one insert per message (survives load).
 let buffer = [];
 setInterval(async () => {
   if (!buffer.length) return;
@@ -72,17 +67,19 @@ client.on("message", async (_topic, raw) => {
   processed++; window++;
   buffer.push({ ...t, ts: new Date(t.ts) });
 
-  // live vehicle state (upsert). Status ownership is split: the vehicle asserts
-  // only physical states (charging, fault); the Booking service owns available/busy.
-  // So we never let telemetry clobber a booking-owned status.
-  const set = { vehicleId: t.vehicleId, location: t.location, speed: t.speed, soc: t.soc, faults: t.faults, updatedAt: new Date() };
-  const update = { $set: set };
-  if (t.status === "charging" || t.status === "fault") set.status = t.status;
-  else update.$setOnInsert = { status: "available" };
-  vehicles.updateOne({ vehicleId: t.vehicleId }, update, { upsert: true })
+  // Update live vehicle state. Status is split-ownership: telemetry may set physical states
+  // (charging/fault) but must never overwrite busy, which dispatch owns. Once the physical state
+  // clears, the vehicle returns to available (else it would stay charging/fault forever).
+  // $literal: telemetry is untrusted, so its values are never evaluated as pipeline expressions.
+  const physical = t.status === "charging" || t.status === "fault";
+  const status = physical ? t.status : {
+    $cond: [{ $in: [{ $ifNull: ["$status", "charging"] }, ["charging", "fault"]] }, "available", "$status"],
+  };
+  const set = { location: t.location, speed: t.speed, soc: t.soc, faults: t.faults };
+  for (const k in set) set[k] = { $literal: set[k] };
+  vehicles.updateOne({ vehicleId: t.vehicleId }, [{ $set: { ...set, status, updatedAt: "$$NOW" } }], { upsert: true })
     .catch((e) => { errors++; console.error("[ingest] upsert:", e.message); });
 
-  // alerts
   if (t.soc < 15) raiseAlert(t.vehicleId, "low_battery", "warning");
   if (t.status === "fault") raiseAlert(t.vehicleId, "safety_fault", "critical");
 });

@@ -1,11 +1,15 @@
 // Operator dashboard: serves one live page and a /api/state endpoint aggregating
 // fleet state, active trips, and alerts from MongoDB.
+// dotenv loads the single centralised .env at the repo root; all config lives there.
 import "dotenv/config";
 import express from "express";
 import { MongoClient } from "mongodb";
 
-const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/fleet";
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const { MONGO_URL, DASHBOARD_PORT } = process.env;
+for (const [k, v] of Object.entries({ MONGO_URL, DASHBOARD_PORT })) {
+  if (!v) { console.error(`[dashboard] ${k} is required — set it in .env`); process.exit(1); }
+}
+const PORT = parseInt(DASHBOARD_PORT, 10);
 
 const mongo = new MongoClient(MONGO_URL);
 await mongo.connect();

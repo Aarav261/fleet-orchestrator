@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Subscribes to vehicle telemetry over MQTT, persists to MongoDB, raises alerts, exposes metrics.",
   "scripts": {
-    "start": "node index.js"
+    "start": "node telemetry-ingest.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Accepts rider requests, buffers them in SQS, and matches riders to the nearest available vehicle.",
   "scripts": {
-    "start": "node index.js"
+    "start": "node booking-dispatch.js"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.700.0",

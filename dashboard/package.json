@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Operator dashboard: live fleet state, active trips, and alerts from MongoDB.",
   "scripts": {
-    "start": "node index.js"
+    "start": "node operator-dashboard.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

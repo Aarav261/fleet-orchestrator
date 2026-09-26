@@ -1,22 +1,19 @@
-// Rider load generator: issues HTTP trip requests to the Dispatch service to
-// represent rider demand. Supports a steady base rate and a burst multiplier
-// (for the "rider request burst" experiment).
+// Rider load generator: POSTs trip requests to Dispatch to fake rider demand. A steady RPS
+// plus a BURST multiplier that kicks in at BURST_AT seconds drives exp2 (rider-request burst).
 //
-// Env:
-//   DISPATCH_URL  default http://localhost:3002
-//   RPS           steady requests/sec, default 5
-//   BURST         multiplier applied after BURST_AT seconds, default 1
-//   BURST_AT      seconds until burst kicks in, default 9999 (never)
-//   DURATION      total seconds to run, default 60
-//   CITY_LAT/CITY_LON  map centre
+// Dials from the root .env (override per run on the CLI):
+//   RPS  steady req/sec   BURST  x-multiplier   BURST_AT  when it starts (s, 9999 = never)
+//   DURATION  total s     DISPATCH_URL  target  CITY_LAT/CITY_LON  map centre
+import "dotenv/config";
 
-const DISPATCH_URL = process.env.DISPATCH_URL || "http://localhost:3002";
-const RPS = parseInt(process.env.RPS || "5", 10);
-const BURST = parseFloat(process.env.BURST || "1");
-const BURST_AT = parseInt(process.env.BURST_AT || "9999", 10);
-const DURATION = parseInt(process.env.DURATION || "60", 10);
-const CITY_LAT = parseFloat(process.env.CITY_LAT || "-37.8136");
-const CITY_LON = parseFloat(process.env.CITY_LON || "144.9631");
+const DISPATCH_URL = process.env.DISPATCH_URL;
+const RPS = parseInt(process.env.RPS, 10);
+const BURST = parseFloat(process.env.BURST);
+const BURST_AT = parseInt(process.env.BURST_AT, 10);
+const DURATION = parseInt(process.env.DURATION, 10);
+const CITY_LAT = parseFloat(process.env.CITY_LAT);
+const CITY_LON = parseFloat(process.env.CITY_LON);
+if (!DISPATCH_URL) { console.error("[riders] DISPATCH_URL is required — set it in .env"); process.exit(1); }
 const SPAN = 0.05;
 
 const rnd = (a, b) => a + Math.random() * (b - a);

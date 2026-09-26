@@ -26,7 +26,7 @@ services:
       IOT_ENDPOINT: ${IOT_ENDPOINT}
       IOT_CERT_DIR: /certs
       MONGO_URL: ${MONGO_URL}
-      PORT: "3001"
+      INGEST_PORT: "3001"
     ports:
       - "3001:3001"
     volumes:
@@ -39,11 +39,12 @@ services:
       IOT_CERT_DIR: /certs
       MONGO_URL: ${MONGO_URL}
       SQS_ENDPOINT: http://elasticmq:9324
-      SQS_QUEUE: http://elasticmq:9324/000000000000/rider-requests
+      SQS_QUEUE_NAME: rider-requests
       AWS_REGION: elasticmq
       AWS_ACCESS_KEY_ID: x
       AWS_SECRET_ACCESS_KEY: x
-      PORT: "3002"
+      DISPATCH_PORT: "3002"
+      DISPATCH_WORKERS: ${DISPATCH_WORKERS:-4}
     ports:
       - "3002:3002"
     volumes:
@@ -55,7 +56,7 @@ services:
     build: ./dashboard
     environment:
       MONGO_URL: ${MONGO_URL}
-      PORT: "3000"
+      DASHBOARD_PORT: "3000"
     ports:
       - "3000:3000"
 

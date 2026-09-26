@@ -1,11 +1,11 @@
-// Booking & Dispatch service.
-// POST /requests  -> validate + enqueue to SQS (queue-based load leveling), return 202 fast.
-// Worker loop     -> long-poll SQS, atomically claim nearest available vehicle (geo),
-//                    create trip + dispatch_audit, send MQTT dispatch command.
+// Booking & Dispatch service. Two decoupled halves:
+//   POST /requests  ->  validate, queue to SQS, return 202 (fast; absorbs demand bursts)
+//   worker loop     ->  poll SQS, claim nearest available vehicle, write trip + audit, dispatch
 //
-// Scales with RIDER DEMAND. Autoscaling trigger = SQS queue depth (exposed at /metrics).
-// Every replica is a competing consumer on the same queue, so scaling out = more throughput.
-
+// Scales with RIDER DEMAND: autoscale on SQS queue depth (/metrics). Replicas are competing
+// consumers on one queue, so adding replicas adds throughput.
+//
+// All config comes from the root .env (no in-code defaults); CLI overrides still win.
 import "dotenv/config";
 import express from "express";
 import { MongoClient } from "mongodb";
@@ -16,22 +16,22 @@ import {
 } from "@aws-sdk/client-sqs";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// AWS IoT Core (mTLS) — the only broker. svc-dispatch backend cert; FleetBackendPolicy permits
-// publishing dispatch commands to fleet/dispatch/*.
-const IOT_ENDPOINT = process.env.IOT_ENDPOINT;
-const IOT_CERT_DIR = process.env.IOT_CERT_DIR || path.resolve(__dirname, "../../infra/iot/certs");
-const CLIENT_ID = process.env.IOT_CLIENT_ID || "svc-dispatch";
-if (!IOT_ENDPOINT) { console.error("[dispatch] IOT_ENDPOINT is required (AWS IoT Core data endpoint)"); process.exit(1); }
-
-const MONGO_URL = process.env.MONGO_URL || "mongodb://localhost:27017/fleet";
-const SQS_ENDPOINT = process.env.SQS_ENDPOINT || "http://localhost:9324";
-const AWS_REGION = process.env.AWS_REGION || "elasticmq";
-const PORT = parseInt(process.env.PORT || "3002", 10);
-const WORKERS = parseInt(process.env.WORKERS || "4", 10); // concurrent poll loops per replica
+// IoT Core client id = fixed service identity (must match the cert file name), so it's a constant.
+const CLIENT_ID = "svc-dispatch";
+// SQS_ENDPOINT is optional: set it for local ElasticMQ, leave it unset for real AWS SQS.
+const {
+  IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, SQS_ENDPOINT, SQS_QUEUE_NAME,
+  AWS_REGION, DISPATCH_PORT, DISPATCH_WORKERS,
+} = process.env;
+for (const [k, v] of Object.entries({
+  IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, SQS_QUEUE_NAME,
+  AWS_REGION, DISPATCH_PORT, DISPATCH_WORKERS,
+})) {
+  if (!v) { console.error(`[dispatch] ${k} is required — set it in .env`); process.exit(1); }
+}
+const PORT = parseInt(DISPATCH_PORT, 10);
+const WORKERS = parseInt(DISPATCH_WORKERS, 10); // concurrent poll loops per replica
 const INSTANCE = process.env.HOSTNAME || "dispatch-local";
 
 const mongo = new MongoClient(MONGO_URL);
@@ -42,12 +42,11 @@ const trips = db.collection("trips");
 const audit = db.collection("dispatch_audit");
 await vehicles.createIndex({ location: "2dsphere" });
 
-const sqs = new SQSClient({
-  endpoint: SQS_ENDPOINT, region: AWS_REGION,
-  credentials: { accessKeyId: process.env.AWS_ACCESS_KEY_ID || "x", secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "x" },
-});
+// Credentials come from the SDK default chain: env vars (ElasticMQ dummy keys),
+// ~/.aws/credentials with session token (Learner Lab host), or the LabRole task role (ECS).
+const sqs = new SQSClient({ endpoint: SQS_ENDPOINT || undefined, region: AWS_REGION });
 // idempotent: ensure the queue exists, then resolve its URL
-const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: "rider-requests" }));
+const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: SQS_QUEUE_NAME }));
 const QUEUE_URL = QueueUrl;
 console.log(`[dispatch ${INSTANCE}] queue ${QUEUE_URL}`);
 
@@ -98,8 +97,10 @@ app.get("/metrics", (_req, res) => {
 app.listen(PORT, () => console.log(`[dispatch ${INSTANCE}] http on :${PORT} workers=${WORKERS}`));
 
 // --- worker: long-poll SQS and match ---
+// Pick the nearest bookable vehicle and claim it. The 5 nearest ($near, available, SOC>15) are
+// candidates; the status-guarded update is the claim — only one worker can flip a given vehicle
+// available->busy, so concurrent workers never double-assign. Fall to the next candidate on a lost race.
 async function claimNearest(origin) {
-  // nearest available candidates with SOC > 15%, then atomic claim to avoid double-assign
   const candidates = await vehicles.find({
     status: "available", soc: { $gt: 15 },
     location: { $near: { $geometry: origin } },
@@ -107,7 +108,7 @@ async function claimNearest(origin) {
 
   for (const c of candidates) {
     const claim = await vehicles.updateOne({ vehicleId: c.vehicleId, status: "available" }, { $set: { status: "busy" } });
-    if (claim.modifiedCount === 1) return c; // won the race
+    if (claim.modifiedCount === 1) return c;
   }
   return null;
 }
@@ -119,9 +120,9 @@ async function handle(msg) {
   const _id = new ObjectId(tripId);
   const chosen = await claimNearest(origin);
   if (!chosen) {
-    unmatched++;
+    unmatched++;  // no bookable vehicle; mark unmatched (demo: no retry)
     await trips.updateOne({ _id }, { $set: { status: "unmatched" } });
-    return; // leave for retry? For the demo we mark unmatched (no idle vehicle available)
+    return;
   }
   const distanceM = haversine(origin.coordinates, chosen.location.coordinates);
   await trips.updateOne({ _id }, { $set: { status: "matched", vehicleId: chosen.vehicleId, matched_at: new Date() } });
@@ -131,8 +132,7 @@ async function handle(msg) {
   });
   mqttClient.publish(`fleet/dispatch/${chosen.vehicleId}`, JSON.stringify({ command: "accept_trip", tripId, destination: origin }));
   matched++;
-  // Close the trip lifecycle after a simulated ride, releasing the vehicle back
-  // to the matching pool (trips: matched -> completed; vehicle: busy -> available).
+  // After a simulated ride, complete the trip and return the vehicle to the pool (busy -> available).
   const tripMs = 15_000 + Math.random() * 30_000;
   setTimeout(() => {
     trips.updateOne({ _id }, { $set: { status: "completed", completed_at: new Date() } }).catch(() => errors++);
