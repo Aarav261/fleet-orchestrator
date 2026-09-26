@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 const CERT_NAME = "svc-ingest";
 const CLIENT_ID = `${CERT_NAME}-${randomUUID().slice(0, 8)}`;
 const { IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT } = process.env;
-for (const [k, v] of Object.entries({ IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT })) {
+for (const [k, v] of Object.entries({ IOT_ENDPOINT, MONGO_URL, INGEST_PORT })) {
   if (!v) { console.error(`[ingest] ${k} is required — set it in .env`); process.exit(1); }
 }
 const PORT = parseInt(INGEST_PORT, 10);
@@ -39,6 +39,18 @@ let processed = 0, errors = 0, alertsRaised = 0;
 let window = 0; // messages in the current 1 s window
 let msgsPerSec = 0;
 setInterval(() => { msgsPerSec = window; window = 0; }, 1000);
+
+// Autoscaling signal: on ECS this CloudWatch Embedded Metric Format line becomes the metric
+// Fleet/IngestMsgsPerSec (average per task), with no SDK call. Skipped off ECS - it's only log noise there.
+let emfLast = 0;
+if (process.env.ECS_CONTAINER_METADATA_URI_V4) setInterval(() => {
+  const rate = (processed - emfLast) / 10; emfLast = processed;
+  console.log(JSON.stringify({
+    _aws: { Timestamp: Date.now(), CloudWatchMetrics: [{ Namespace: "Fleet", Dimensions: [["Service"]],
+      Metrics: [{ Name: "IngestMsgsPerSec", Unit: "Count/Second" }] }] },
+    Service: "ingest", IngestMsgsPerSec: rate,
+  }));
+}, 10_000);
 
 // Batch telemetry writes once a second, not one insert per message (survives load).
 let buffer = [];
@@ -62,11 +74,13 @@ async function shutdown(sig) {
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
 
+// Cert/key/CA: env vars on ECS (injected from Secrets Manager), otherwise files in IOT_CERT_DIR.
+const pem = (envVar, file) => process.env[envVar] || fs.readFileSync(path.join(IOT_CERT_DIR, file));
 const client = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
   clientId: CLIENT_ID,
-  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.cert.pem`)),
-  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.private.key`)),
-  ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
+  cert: pem("IOT_CERT", `${CERT_NAME}.cert.pem`),
+  key: pem("IOT_KEY", `${CERT_NAME}.private.key`),
+  ca: pem("IOT_CA", "AmazonRootCA1.pem"),
   reconnectPeriod: 2000,
 });
 client.on("connect", () => {

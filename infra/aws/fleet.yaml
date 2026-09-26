@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Fleet orchestration platform on ECS Fargate: ALB -> dispatch + dashboard, ingest (no inbound),
+  SQS rider queue, and two independent target-tracking autoscaling policies.
+  Learner Lab: every role is the pre-provisioned LabRole; this template creates no IAM resources.
+  Deployed by infra/aws/deploy.js (which builds/pushes the images and upserts the secrets first).
+
+Parameters:
+  VpcId: { Type: "AWS::EC2::VPC::Id" }
+  Subnets:
+    Type: "List<AWS::EC2::Subnet::Id>"
+    Description: Public subnets in >= 2 Fargate-capable AZs (the ALB needs two).
+  ImageTag: { Type: String, Description: Tag pushed to the fleet-* ECR repos; a new tag rolls the services. }
+  IotEndpoint: { Type: String }
+  SharedSecretArn: { Type: String, Description: "fleet/shared (mongo_url, iot_ca)" }
+  IngestSecretArn: { Type: String, Description: "fleet/svc-ingest (cert, key)" }
+  DispatchSecretArn: { Type: String, Description: "fleet/svc-dispatch (cert, key)" }
+  MaxTasks: { Type: Number, Default: 4 }
+  DispatchBacklogPerTask: { Type: Number, Default: 20, Description: Target SQS messages visible per dispatch task. }
+  IngestMsgsPerTask: { Type: Number, Default: 40, Description: Target telemetry msgs/sec per ingest task. }
+
+Resources:
+  # --- network -------------------------------------------------------------------------------------
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fleet ALB - HTTP from the internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: [{ IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }]
+  TaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fleet tasks - service ports from the ALB only (ingest has no inbound)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: [{ IpProtocol: tcp, FromPort: 3000, ToPort: 3002, SourceSecurityGroupId: !Ref AlbSg }]
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: { Subnets: !Ref Subnets, SecurityGroups: [!Ref AlbSg] }
+  DispatchTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 3002
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      # Default 300 s drain would slow every scale-in; dispatch requests are short.
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  DashboardTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 3000
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref DashboardTg }]
+  # Rider API paths go to dispatch; everything else is the dashboard.
+  DispatchRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions: [{ Field: path-pattern, Values: [/requests, /metrics, /healthz] }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref DispatchTg }]
+
+  # --- queue + logs --------------------------------------------------------------------------------
+  # Stack-owned queue (not the hand-made rider-requests), so delete-stack removes it too.
+  RiderQueue:
+    Type: AWS::SQS::Queue
+    Properties: { QueueName: !Sub "${AWS::StackName}-rider-requests" }
+  IngestLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
+  DispatchLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
+  DashboardLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
+
+  # --- ECS -----------------------------------------------------------------------------------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings: [{ Name: containerInsights, Value: enabled }] # RunningTaskCount for dispatch scaling
+
+  IngestTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      TaskRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      ContainerDefinitions:
+        - Name: ingest
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/fleet-ingest:${ImageTag}
+          Essential: true
+          PortMappings: [{ ContainerPort: 3001 }]
+          Environment:
+            - { Name: IOT_ENDPOINT, Value: !Ref IotEndpoint }
+            - { Name: INGEST_PORT, Value: "3001" }
+          Secrets:
+            - { Name: MONGO_URL, ValueFrom: !Sub "${SharedSecretArn}:mongo_url::" }
+            - { Name: IOT_CA, ValueFrom: !Sub "${SharedSecretArn}:iot_ca::" }
+            - { Name: IOT_CERT, ValueFrom: !Sub "${IngestSecretArn}:cert::" }
+            - { Name: IOT_KEY, ValueFrom: !Sub "${IngestSecretArn}:key::" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref IngestLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: ingest }
+  DispatchTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      TaskRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      ContainerDefinitions:
+        - Name: dispatch
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/fleet-dispatch:${ImageTag}
+          Essential: true
+          PortMappings: [{ ContainerPort: 3002 }]
+          Environment:
+            - { Name: IOT_ENDPOINT, Value: !Ref IotEndpoint }
+            - { Name: SQS_QUEUE_NAME, Value: !GetAtt RiderQueue.QueueName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: DISPATCH_PORT, Value: "3002" }
+            - { Name: DISPATCH_WORKERS, Value: "4" }
+          Secrets:
+            - { Name: MONGO_URL, ValueFrom: !Sub "${SharedSecretArn}:mongo_url::" }
+            - { Name: IOT_CA, ValueFrom: !Sub "${SharedSecretArn}:iot_ca::" }
+            - { Name: IOT_CERT, ValueFrom: !Sub "${DispatchSecretArn}:cert::" }
+            - { Name: IOT_KEY, ValueFrom: !Sub "${DispatchSecretArn}:key::" }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref DispatchLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: dispatch }
+  DashboardTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      TaskRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      ContainerDefinitions:
+        - Name: dashboard
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/fleet-dashboard:${ImageTag}
+          Essential: true
+          PortMappings: [{ ContainerPort: 3000 }]
+          Environment: [{ Name: DASHBOARD_PORT, Value: "3000" }]
+          Secrets: [{ Name: MONGO_URL, ValueFrom: !Sub "${SharedSecretArn}:mongo_url::" }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref DashboardLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: dashboard }
+
+  # DesiredCount is deliberately omitted: it starts at 1, and stack updates then leave the count
+  # to autoscaling instead of resetting it.
+  IngestService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref IngestTask
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration: { Subnets: !Ref Subnets, SecurityGroups: [!Ref TaskSg], AssignPublicIp: ENABLED }
+  DispatchService:
+    Type: AWS::ECS::Service
+    DependsOn: DispatchRule
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref DispatchTask
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      LoadBalancers: [{ TargetGroupArn: !Ref DispatchTg, ContainerName: dispatch, ContainerPort: 3002 }]
+      NetworkConfiguration:
+        AwsvpcConfiguration: { Subnets: !Ref Subnets, SecurityGroups: [!Ref TaskSg], AssignPublicIp: ENABLED }
+  DashboardService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref DashboardTask
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      LoadBalancers: [{ TargetGroupArn: !Ref DashboardTg, ContainerName: dashboard, ContainerPort: 3000 }]
+      NetworkConfiguration:
+        AwsvpcConfiguration: { Subnets: !Ref Subnets, SecurityGroups: [!Ref TaskSg], AssignPublicIp: ENABLED }
+
+  # --- autoscaling: two services, two independent signals ------------------------------------------
+  # Dispatch scales on rider demand: SQS backlog per running task. Not CPU - dispatch is I/O-bound on
+  # Atlas round trips, so CPU stays low while the queue grows.
+  DispatchScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub service/${Cluster}/${DispatchService.Name}
+      MinCapacity: 1
+      MaxCapacity: !Ref MaxTasks
+  DispatchBacklogPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: dispatch-backlog-per-task
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref DispatchScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref DispatchBacklogPerTask
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 60
+        CustomizedMetricSpecification:
+          Metrics:
+            - Id: backlog
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/SQS
+                  MetricName: ApproximateNumberOfMessagesVisible
+                  Dimensions: [{ Name: QueueName, Value: !GetAtt RiderQueue.QueueName }]
+                Stat: Sum
+            - Id: tasks
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: ECS/ContainerInsights
+                  MetricName: RunningTaskCount
+                  Dimensions:
+                    - { Name: ClusterName, Value: !Ref Cluster }
+                    - { Name: ServiceName, Value: !GetAtt DispatchService.Name }
+                Stat: Average
+            - Id: backlogPerTask
+              Expression: backlog / tasks
+              ReturnData: true
+
+  # Ingest scales on fleet size: average telemetry msgs/sec per task, emitted by ingest as an EMF log
+  # line (Fleet/IngestMsgsPerSec). The shared subscription splits messages across tasks, so adding a
+  # task lowers the per-task rate and the policy converges.
+  IngestScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub service/${Cluster}/${IngestService.Name}
+      MinCapacity: 1
+      MaxCapacity: !Ref MaxTasks
+  IngestRatePolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ingest-msgs-per-task
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref IngestScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref IngestMsgsPerTask
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 60
+        CustomizedMetricSpecification:
+          Namespace: Fleet
+          MetricName: IngestMsgsPerSec
+          Dimensions: [{ Name: Service, Value: ingest }]
+          Statistic: Average
+
+Outputs:
+  DashboardUrl: { Value: !Sub "http://${Alb.DNSName}/" }
+  RiderApi: { Value: !Sub "http://${Alb.DNSName}/requests" }
+  ClusterName: { Value: !Ref Cluster }
+  RiderQueueName: { Value: !GetAtt RiderQueue.QueueName }

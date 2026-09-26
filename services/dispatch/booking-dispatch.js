@@ -28,7 +28,7 @@ const {
   AWS_REGION, DISPATCH_PORT, DISPATCH_WORKERS,
 } = process.env;
 for (const [k, v] of Object.entries({
-  IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, SQS_QUEUE_NAME,
+  IOT_ENDPOINT, MONGO_URL, SQS_QUEUE_NAME,
   AWS_REGION, DISPATCH_PORT, DISPATCH_WORKERS,
 })) {
   if (!v) { console.error(`[dispatch] ${k} is required — set it in .env`); process.exit(1); }
@@ -54,11 +54,13 @@ const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: SQS_QUEU
 const QUEUE_URL = QueueUrl;
 console.log(`[dispatch ${INSTANCE}] queue ${QUEUE_URL}`);
 
+// Cert/key/CA: env vars on ECS (injected from Secrets Manager), otherwise files in IOT_CERT_DIR.
+const pem = (envVar, file) => process.env[envVar] || fs.readFileSync(path.join(IOT_CERT_DIR, file));
 const mqttClient = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
   clientId: CLIENT_ID,
-  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.cert.pem`)),
-  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.private.key`)),
-  ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
+  cert: pem("IOT_CERT", `${CERT_NAME}.cert.pem`),
+  key: pem("IOT_KEY", `${CERT_NAME}.private.key`),
+  ca: pem("IOT_CA", "AmazonRootCA1.pem"),
   reconnectPeriod: 2000,
 });
 mqttClient.on("connect", () => console.log(`[dispatch ${INSTANCE}] mqtt connected via IoT Core`));
