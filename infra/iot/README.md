@@ -20,7 +20,15 @@ Certs land in `certs/` (gitignored — private keys). `AmazonRootCA1.pem` must b
 curl -o certs/AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.pem
 ```
 
-## Point the simulator at IoT Core (pending)
-The simulator currently connects to Mosquitto over plain MQTT. To use IoT Core it needs mTLS —
-env-gated so local runs still default to Mosquitto. Ingest (subscribes `fleet/telemetry/#`) needs a
-separate backend-service policy/cert, since the per-vehicle policy above is scoped to one vehicle.
+## Backend services and replicas
+Ingest, dispatch and Node-RED use `FleetBackendPolicy` (`backend-policy.json`). Every replica of a
+service shares that service's cert but connects with a unique client id (`svc-ingest-<random>`), since
+IoT Core drops a connection when another connects with the same id; the policy allows `svc-ingest-*`
+and `svc-dispatch-*`. Ingest subscribes to the shared subscription `$share/ingest/fleet/telemetry/#`,
+so IoT Core splits telemetry across replicas instead of sending every message to each one.
+
+After editing the policy, publish it as a new default version (IoT keeps at most 5 versions):
+```bash
+aws iot create-policy-version --policy-name FleetBackendPolicy \
+  --policy-document file://infra/iot/backend-policy.json --set-as-default
+```

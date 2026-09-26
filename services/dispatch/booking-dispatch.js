@@ -16,9 +16,12 @@ import {
 } from "@aws-sdk/client-sqs";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
-// IoT Core client id = fixed service identity (must match the cert file name), so it's a constant.
-const CLIENT_ID = "svc-dispatch";
+// All replicas share the svc-dispatch cert, but each needs its own client id: IoT Core drops an
+// existing connection when another connects with the same id. FleetBackendPolicy allows svc-dispatch-*.
+const CERT_NAME = "svc-dispatch";
+const CLIENT_ID = `${CERT_NAME}-${randomUUID().slice(0, 8)}`;
 // SQS_ENDPOINT is optional: set it for local ElasticMQ, leave it unset for real AWS SQS.
 const {
   IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, SQS_ENDPOINT, SQS_QUEUE_NAME,
@@ -41,6 +44,7 @@ const vehicles = db.collection("vehicles");
 const trips = db.collection("trips");
 const audit = db.collection("dispatch_audit");
 await vehicles.createIndex({ location: "2dsphere" });
+await trips.createIndex({ status: 1, due_at: 1 }); // trip-completion sweep
 
 // Credentials come from the SDK default chain: env vars (ElasticMQ dummy keys),
 // ~/.aws/credentials with session token (Learner Lab host), or the LabRole task role (ECS).
@@ -52,8 +56,8 @@ console.log(`[dispatch ${INSTANCE}] queue ${QUEUE_URL}`);
 
 const mqttClient = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
   clientId: CLIENT_ID,
-  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.cert.pem`)),
-  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.private.key`)),
+  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.cert.pem`)),
+  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.private.key`)),
   ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
   reconnectPeriod: 2000,
 });
@@ -100,9 +104,12 @@ app.listen(PORT, () => console.log(`[dispatch ${INSTANCE}] http on :${PORT} work
 // Pick the nearest bookable vehicle and claim it. The 5 nearest ($near, available, SOC>15) are
 // candidates; the status-guarded update is the claim — only one worker can flip a given vehicle
 // available->busy, so concurrent workers never double-assign. Fall to the next candidate on a lost race.
+// Only vehicles heard from in the last 60 s count: an idle vehicle heartbeats every 30 s, so two
+// missed heartbeats means it is offline, even if its last known status was "available".
+const ONLINE_MS = 60_000;
 async function claimNearest(origin) {
   const candidates = await vehicles.find({
-    status: "available", soc: { $gt: 15 },
+    status: "available", soc: { $gt: 15 }, updatedAt: { $gt: new Date(Date.now() - ONLINE_MS) },
     location: { $near: { $geometry: origin } },
   }).limit(5).project({ vehicleId: 1, location: 1 }).toArray();
 
@@ -125,22 +132,30 @@ async function handle(msg) {
     return;
   }
   const distanceM = haversine(origin.coordinates, chosen.location.coordinates);
-  await trips.updateOne({ _id }, { $set: { status: "matched", vehicleId: chosen.vehicleId, matched_at: new Date() } });
+  // Simulated ride length. due_at lives in the trip (not an in-memory timer) so any replica's
+  // sweep can complete it, even if this replica is scaled in mid-trip.
+  const due_at = new Date(Date.now() + 15_000 + Math.random() * 30_000);
+  await trips.updateOne({ _id }, { $set: { status: "matched", vehicleId: chosen.vehicleId, matched_at: new Date(), due_at } });
   await audit.insertOne({
     tripId, vehicleId: chosen.vehicleId, candidates_evaluated: 5,
     distance_m: Math.round(distanceM), decided_at: new Date(), decided_by: INSTANCE,
   });
   mqttClient.publish(`fleet/dispatch/${chosen.vehicleId}`, JSON.stringify({ command: "accept_trip", tripId, destination: origin }));
   matched++;
-  // After a simulated ride, complete the trip and return the vehicle to the pool (busy -> available).
-  const tripMs = 15_000 + Math.random() * 30_000;
-  setTimeout(() => {
-    trips.updateOne({ _id }, { $set: { status: "completed", completed_at: new Date() } }).catch(() => errors++);
-    vehicles.updateOne({ vehicleId: chosen.vehicleId, status: "busy" }, { $set: { status: "available" } }).catch(() => errors++);
-  }, tripMs);
   matchLatencies.push(Date.now() - t0);
   if (matchLatencies.length > 5000) matchLatencies.splice(0, 2500);
 }
+
+// Complete overdue trips and return their vehicles to the pool (busy -> available). Every replica
+// sweeps; the status-guarded update means only one replica completes a given trip.
+async function completeDueTrips() {
+  const due = await trips.find({ status: "matched", due_at: { $lte: new Date() } }).project({ vehicleId: 1 }).toArray();
+  for (const t of due) {
+    const done = await trips.updateOne({ _id: t._id, status: "matched" }, { $set: { status: "completed", completed_at: new Date() } });
+    if (done.modifiedCount === 1) await vehicles.updateOne({ vehicleId: t.vehicleId, status: "busy" }, { $set: { status: "available" } });
+  }
+}
+setInterval(() => completeDueTrips().catch(() => errors++), 2000);
 
 async function pollLoop(id) {
   for (;;) {

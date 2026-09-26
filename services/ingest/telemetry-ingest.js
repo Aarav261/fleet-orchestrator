@@ -10,10 +10,12 @@ import mqtt from "mqtt";
 import { MongoClient } from "mongodb";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
-// IoT Core client id = fixed service identity (must match the cert file name). The svc-ingest
-// cert's policy (FleetBackendPolicy) allows the fleet/telemetry/# wildcard subscribe.
-const CLIENT_ID = "svc-ingest";
+// All replicas share the svc-ingest cert, but each needs its own client id: IoT Core drops an
+// existing connection when another connects with the same id. FleetBackendPolicy allows svc-ingest-*.
+const CERT_NAME = "svc-ingest";
+const CLIENT_ID = `${CERT_NAME}-${randomUUID().slice(0, 8)}`;
 const { IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT } = process.env;
 for (const [k, v] of Object.entries({ IOT_ENDPOINT, IOT_CERT_DIR, MONGO_URL, INGEST_PORT })) {
   if (!v) { console.error(`[ingest] ${k} is required — set it in .env`); process.exit(1); }
@@ -40,23 +42,38 @@ setInterval(() => { msgsPerSec = window; window = 0; }, 1000);
 
 // Batch telemetry writes once a second, not one insert per message (survives load).
 let buffer = [];
-setInterval(async () => {
+async function flush() {
   if (!buffer.length) return;
   const batch = buffer; buffer = [];
   try { await telemetry.insertMany(batch, { ordered: false }); }
   catch (e) { errors++; console.error("[ingest] bulk insert error:", e.message); }
-}, 1000);
+}
+setInterval(flush, 1000);
+
+// Graceful scale-in: ECS sends SIGTERM (30 s grace) before stopping a task. Stop receiving first,
+// so IoT Core routes the shared subscription to the remaining replicas, then write what is buffered.
+async function shutdown(sig) {
+  await new Promise((r) => client.end(false, r));
+  console.log(`[ingest ${INSTANCE}] ${sig}: processed ${processed}, flushing ${buffer.length} buffered readings`);
+  await flush();
+  await mongo.close();
+  process.exit(0);
+}
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 
 const client = mqtt.connect(`mqtts://${IOT_ENDPOINT}:8883`, {
   clientId: CLIENT_ID,
-  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.cert.pem`)),
-  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CLIENT_ID}.private.key`)),
+  cert: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.cert.pem`)),
+  key: fs.readFileSync(path.join(IOT_CERT_DIR, `${CERT_NAME}.private.key`)),
   ca: fs.readFileSync(path.join(IOT_CERT_DIR, "AmazonRootCA1.pem")),
   reconnectPeriod: 2000,
 });
 client.on("connect", () => {
-  client.subscribe("fleet/telemetry/#", (err) => {
-    console.log(err ? `[ingest] subscribe error ${err.message}` : `[ingest ${INSTANCE}] subscribed fleet/telemetry/# via IoT Core`);
+  // Shared subscription: IoT Core load-balances telemetry across all ingest replicas in the
+  // "ingest" group, so adding a replica splits the load instead of duplicating every message.
+  client.subscribe("$share/ingest/fleet/telemetry/#", (err) => {
+    console.log(err ? `[ingest] subscribe error ${err.message}` : `[ingest ${INSTANCE}] ${CLIENT_ID} subscribed $share/ingest/fleet/telemetry/# via IoT Core`);
   });
 });
 client.on("error", (e) => console.error("[ingest] mqtt error:", e.message));

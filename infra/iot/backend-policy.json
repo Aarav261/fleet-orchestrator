@@ -5,8 +5,8 @@
       "Effect": "Allow",
       "Action": "iot:Connect",
       "Resource": [
-        "arn:aws:iot:us-east-1:203377390456:client/svc-ingest",
-        "arn:aws:iot:us-east-1:203377390456:client/svc-dispatch",
+        "arn:aws:iot:us-east-1:203377390456:client/svc-ingest-*",
+        "arn:aws:iot:us-east-1:203377390456:client/svc-dispatch-*",
         "arn:aws:iot:us-east-1:203377390456:client/svc-nodered"
       ]
     },
@@ -14,6 +14,7 @@
       "Effect": "Allow",
       "Action": "iot:Subscribe",
       "Resource": [
+        "arn:aws:iot:us-east-1:203377390456:topicfilter/$share/ingest/fleet/telemetry/*",
         "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/telemetry/*",
         "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/dispatch/*",
         "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/alerts/*"
