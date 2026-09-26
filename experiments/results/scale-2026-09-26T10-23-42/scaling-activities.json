@@ -1,0 +1,58 @@
+[
+ {
+  "start": "2026-09-26T21:10:40.408000+10:00",
+  "resource": "fleet-DispatchService-B86YKoFJ0smm",
+  "status": "Successful",
+  "description": "Setting desired count to 1.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmLow-c2147cf8-160a-44b5-9e60-d326d4708173 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-26T21:08:40.417000+10:00",
+  "resource": "fleet-DispatchService-B86YKoFJ0smm",
+  "status": "Successful",
+  "description": "Setting desired count to 2.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmLow-c2147cf8-160a-44b5-9e60-d326d4708173 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-26T21:06:40.438000+10:00",
+  "resource": "fleet-DispatchService-B86YKoFJ0smm",
+  "status": "Successful",
+  "description": "Setting desired count to 3.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmLow-c2147cf8-160a-44b5-9e60-d326d4708173 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-26T20:59:36.979000+10:00",
+  "resource": "fleet-IngestService-UIernCDn6aVa",
+  "status": "Successful",
+  "description": "Setting desired count to 1.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-IngestService-UIernCDn6aVa-AlarmLow-60c1845c-83ec-49ae-bd35-90f50aa0bc95 in state ALARM triggered policy ingest-msgs-per-task"
+ },
+ {
+  "start": "2026-09-26T20:57:37.001000+10:00",
+  "resource": "fleet-IngestService-UIernCDn6aVa",
+  "status": "Successful",
+  "description": "Setting desired count to 2.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-IngestService-UIernCDn6aVa-AlarmLow-60c1845c-83ec-49ae-bd35-90f50aa0bc95 in state ALARM triggered policy ingest-msgs-per-task"
+ },
+ {
+  "start": "2026-09-26T20:47:58.323000+10:00",
+  "resource": "fleet-DispatchService-B86YKoFJ0smm",
+  "status": "Successful",
+  "description": "Setting desired count to 4.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmHigh-aa5ebd50-29d6-4eb1-b623-cbf0c28e5065 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-26T20:39:32.788000+10:00",
+  "resource": "fleet-IngestService-UIernCDn6aVa",
+  "status": "Successful",
+  "description": "Setting desired count to 3.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-IngestService-UIernCDn6aVa-AlarmHigh-8cc7b8a1-7706-49ae-aeab-1a8e9665ea9d in state ALARM triggered policy ingest-msgs-per-task"
+ },
+ {
+  "start": "2026-09-26T20:32:32.779000+10:00",
+  "resource": "fleet-IngestService-UIernCDn6aVa",
+  "status": "Successful",
+  "description": "Setting desired count to 2.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-IngestService-UIernCDn6aVa-AlarmHigh-8cc7b8a1-7706-49ae-aeab-1a8e9665ea9d in state ALARM triggered policy ingest-msgs-per-task"
+ }
+]

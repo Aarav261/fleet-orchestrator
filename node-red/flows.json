@@ -1,23 +1,35 @@
 [
-  { "id": "tab-fleet", "type": "tab", "label": "Telemetry Validation & Alert Routing", "disabled": false },
+  {"id":"tab-fleet","type":"tab","label":"Telemetry Validation & Alert Routing","disabled":false},
 
-  { "id": "broker-iot", "type": "mqtt-broker", "name": "iot-core", "broker": "${IOT_ENDPOINT}", "port": "8883", "clientid": "svc-nodered", "usetls": true, "tls": "tls-iot", "protocolVersion": "4", "keepalive": "60", "cleansession": true },
+  {"id":"broker-iot","type":"mqtt-broker","name":"iot-core","broker":"${IOT_ENDPOINT}","port":"8883","clientid":"svc-nodered","usetls":true,"tls":"tls-iot","protocolVersion":"4","keepalive":"60","cleansession":true},
 
-  { "id": "tls-iot", "type": "tls-config", "name": "iot-core-mtls", "cert": "/certs/svc-nodered.cert.pem", "key": "/certs/svc-nodered.private.key", "ca": "/certs/AmazonRootCA1.pem", "certname": "", "keyname": "", "caname": "", "servername": "", "verifyservercert": true, "alpnprotocol": "" },
+  {"id":"tls-iot","type":"tls-config","name":"iot-core-mtls","cert":"/certs/svc-nodered.cert.pem","key":"/certs/svc-nodered.private.key","ca":"/certs/AmazonRootCA1.pem","certname":"","keyname":"","caname":"","servername":"","verifyservercert":true,"alpnprotocol":""},
 
-  { "id": "mqtt-in", "type": "mqtt in", "z": "tab-fleet", "name": "vehicle telemetry", "topic": "fleet/telemetry/#", "qos": "0", "datatype": "auto", "broker": "broker-iot", "x": 140, "y": 160, "wires": [["json-parse"]] },
+  {"id":"mqtt-in","type":"mqtt in","z":"tab-fleet","name":"alert candidates (IoT rule)","topic":"fleet/alert-candidates/#","qos":"0","datatype":"auto","broker":"broker-iot","x":140,"y":160,"wires":[["json-parse"]]},
 
-  { "id": "json-parse", "type": "json", "z": "tab-fleet", "name": "parse JSON", "property": "payload", "action": "obj", "x": 330, "y": 160, "wires": [["fn-validate"]] },
+  {"id":"json-parse","type":"json","z":"tab-fleet","name":"parse JSON","property":"payload","action":"obj","x":330,"y":160,"wires":[["fn-validate"]]},
 
-  { "id": "fn-validate", "type": "function", "z": "tab-fleet", "name": "schema validation", "func": "const t = msg.payload || {};\nconst ok = t.vehicleId && t.location && Array.isArray(t.location.coordinates)\n  && typeof t.soc === 'number' && t.status;\nmsg.valid = !!ok;\nreturn msg;", "outputs": 1, "x": 540, "y": 160, "wires": [["sw-valid"]] },
+  {"id":"fn-validate","type":"function","z":"tab-fleet","name":"schema validation","func":"const t = msg.payload || {};\nconst ok = t.vehicleId && t.location && Array.isArray(t.location.coordinates)\n  && typeof t.soc === 'number' && t.status;\nmsg.valid = !!ok;\nreturn msg;","outputs":1,"x":540,"y":160,"wires":[["sw-valid"]]},
 
-  { "id": "sw-valid", "type": "switch", "z": "tab-fleet", "name": "valid?", "property": "valid", "propertyType": "msg", "rules": [ { "t": "true" }, { "t": "false" } ], "outputs": 2, "x": 730, "y": 160, "wires": [["fn-alerts"], ["dbg-invalid"]] },
+  {"id":"sw-valid","type":"switch","z":"tab-fleet","name":"valid?","property":"valid","propertyType":"msg","rules":[{"t":"true"},{"t":"false"}],"outputs":2,"x":730,"y":160,"wires":[["fn-alerts"],["dbg-invalid"]]},
 
-  { "id": "fn-alerts", "type": "function", "z": "tab-fleet", "name": "classify alerts", "func": "const t = msg.payload;\nlet alert = null;\nif (t.soc < 15) alert = { type: 'low_battery', severity: 'warning' };\nif (t.status === 'fault') alert = { type: 'safety_fault', severity: 'critical' };\nif (!alert) return [msg, null];\nmsg.payload = { vehicleId: t.vehicleId, ...alert, timestamp: new Date().toISOString() };\nmsg.topic = 'fleet/alerts/' + t.vehicleId;\nreturn [null, msg];", "outputs": 2, "x": 930, "y": 160, "wires": [["dbg-valid"], ["mqtt-alerts", "dbg-alert"]] },
+  {"id":"fn-alerts","type":"function","z":"tab-fleet","name":"classify alerts","func":"const t = msg.payload;\nlet alert = null;\nif (t.soc < 15) alert = { type: 'low_battery', severity: 'warning' };\nif (t.status === 'fault') alert = { type: 'safety_fault', severity: 'critical' };\nif (!alert) return [msg, null];\nmsg.telemetry = t;\nmsg.payload = { vehicleId: t.vehicleId, ...alert, timestamp: new Date().toISOString() };\nmsg.topic = 'fleet/alerts/' + t.vehicleId;\nreturn [null, msg];","outputs":2,"x":930,"y":160,"wires":[["dbg-valid"],["mqtt-alerts","fn-store","dbg-alert","fn-charge"]]},
 
-  { "id": "mqtt-alerts", "type": "mqtt out", "z": "tab-fleet", "name": "route alert", "topic": "", "qos": "0", "retain": "", "broker": "broker-iot", "x": 1160, "y": 120, "wires": [] },
+  {"id":"mqtt-alerts","type":"mqtt out","z":"tab-fleet","name":"route alert","topic":"","qos":"0","retain":"","broker":"broker-iot","x":1160,"y":120,"wires":[]},
 
-  { "id": "dbg-valid", "type": "debug", "z": "tab-fleet", "name": "valid telemetry", "active": true, "console": false, "complete": "false", "x": 1160, "y": 200, "wires": [] },
-  { "id": "dbg-alert", "type": "debug", "z": "tab-fleet", "name": "alert raised", "active": true, "complete": "payload", "x": 1150, "y": 160, "wires": [] },
-  { "id": "dbg-invalid", "type": "debug", "z": "tab-fleet", "name": "rejected (bad schema)", "active": true, "complete": "false", "x": 940, "y": 260, "wires": [] }
+  {"id":"fn-store","type":"function","z":"tab-fleet","name":"store alert (Atlas)","func":"// Node-RED is the only writer of alerts; the dashboard reads this collection.\nconst doc = { ...msg.payload, timestamp: new Date(msg.payload.timestamp), source: \"node-red\" };\nglobal.get(\"mongo\").db().collection(\"alerts\").insertOne(doc)\n  .then(() => node.done())\n  .catch((e) => node.error(e, msg));\nreturn null;","outputs":0,"x":1160,"y":80,"wires":[]},
+
+  {"id":"fn-charge","type":"function","z":"tab-fleet","name":"charge scheduler","func":"// Charge scheduler: send a low-battery vehicle to the nearest station, at most once per 10 min per\n// vehicle (telemetry keeps reporting low SOC every second while it drives there).\nconst STATIONS = [\n  { id: \"stn-docklands\", coordinates: [144.9460, -37.8150] },\n  { id: \"stn-southbank\", coordinates: [144.9640, -37.8250] },\n  { id: \"stn-carlton\", coordinates: [144.9670, -37.8000] },\n  { id: \"stn-richmond\", coordinates: [144.9920, -37.8180] },\n];\nconst t = msg.telemetry;\nif (!(t.soc < 15) || t.status === \"charging\") return null;\nconst recent = flow.get(\"assigned\") || {};\nif (Date.now() - (recent[t.vehicleId] || 0) < 600000) return null;\n\nconst [lon, lat] = t.location.coordinates;\nconst rad = (d) => (d * Math.PI) / 180;\nconst metres = ([lon2, lat2]) => {\n  const h = Math.sin(rad(lat2 - lat) / 2) ** 2 + Math.cos(rad(lat)) * Math.cos(rad(lat2)) * Math.sin(rad(lon2 - lon) / 2) ** 2;\n  return 2 * 6371000 * Math.asin(Math.sqrt(h));\n};\nlet best = null, bestM = Infinity;\nfor (const s of STATIONS) { const m = metres(s.coordinates); if (m < bestM) { best = s; bestM = m; } }\nrecent[t.vehicleId] = Date.now();\nflow.set(\"assigned\", recent);\n\nreturn [\n  { topic: \"fleet/dispatch/\" + t.vehicleId,\n    payload: { command: \"go_charge\", stationId: best.id, location: { type: \"Point\", coordinates: best.coordinates } } },\n  { payload: { vehicleId: t.vehicleId, stationId: best.id, distance_m: Math.round(bestM), soc: t.soc,\n    assigned_at: new Date(), source: \"node-red\" } },\n];","outputs":2,"x":1160,"y":40,"wires":[["mqtt-cmd"],["fn-store-charge","dbg-charge"]]},
+
+  {"id":"mqtt-cmd","type":"mqtt out","z":"tab-fleet","name":"go_charge command","topic":"","qos":"0","retain":"","broker":"broker-iot","x":1400,"y":20,"wires":[]},
+
+  {"id":"fn-store-charge","type":"function","z":"tab-fleet","name":"store assignment (Atlas)","func":"global.get(\"mongo\").db().collection(\"charge_assignments\").insertOne(msg.payload)\n  .then(() => node.done())\n  .catch((e) => node.error(e, msg));\nreturn null;","outputs":0,"x":1410,"y":60,"wires":[]},
+
+  {"id":"dbg-charge","type":"debug","z":"tab-fleet","name":"charge assigned","active":true,"console":true,"complete":"payload","x":1400,"y":100,"wires":[]},
+
+  {"id":"dbg-valid","type":"debug","z":"tab-fleet","name":"valid telemetry","active":true,"console":false,"complete":"false","x":1160,"y":200,"wires":[]},
+
+  {"id":"dbg-alert","type":"debug","z":"tab-fleet","name":"alert raised","active":true,"complete":"payload","x":1150,"y":160,"wires":[],"console":true},
+
+  {"id":"dbg-invalid","type":"debug","z":"tab-fleet","name":"rejected (bad schema)","active":true,"complete":"false","x":940,"y":260,"wires":[]}
 ]

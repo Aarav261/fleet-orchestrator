@@ -1,5 +1,6 @@
 // Telemetry Ingest service. Subscribes to fleet/telemetry/#, appends each reading to the
-// telemetry log, keeps live vehicle state current, and raises alerts (low battery / fault).
+// telemetry log and keeps live vehicle state current. Alerts are Node-RED's job (IoT rule ->
+// fleet/alert-candidates -> Node-RED), so this hot path does one thing per message.
 //
 // Scales with FLEET SIZE: autoscale on message volume (/metrics msgsPerSec is that signal).
 //
@@ -28,14 +29,13 @@ await mongo.connect();
 const db = mongo.db();
 const telemetry = db.collection("telemetry");
 const vehicles = db.collection("vehicles");
-const alerts = db.collection("alerts");
 await vehicles.createIndex({ location: "2dsphere" });
 await vehicles.createIndex({ vehicleId: 1 }, { unique: true });
 await telemetry.createIndex({ vehicleId: 1, ts: -1 });
 console.log(`[ingest ${INSTANCE}] mongo connected, indexes ensured`);
 
 // --- metrics ---
-let processed = 0, errors = 0, alertsRaised = 0;
+let processed = 0, errors = 0;
 let window = 0; // messages in the current 1 s window
 let msgsPerSec = 0;
 setInterval(() => { msgsPerSec = window; window = 0; }, 1000);
@@ -110,25 +110,17 @@ client.on("message", async (_topic, raw) => {
   for (const k in set) set[k] = { $literal: set[k] };
   vehicles.updateOne({ vehicleId: t.vehicleId }, [{ $set: { ...set, status, updatedAt: "$$NOW" } }], { upsert: true })
     .catch((e) => { errors++; console.error("[ingest] upsert:", e.message); });
-
-  if (t.soc < 15) raiseAlert(t.vehicleId, "low_battery", "warning");
-  if (t.status === "fault") raiseAlert(t.vehicleId, "safety_fault", "critical");
 });
-
-function raiseAlert(vehicleId, type, severity) {
-  alertsRaised++;
-  alerts.insertOne({ vehicleId, type, severity, timestamp: new Date() }).catch(() => errors++);
-}
 
 const app = express();
 app.get("/healthz", (_req, res) => res.json({ ok: true, instance: INSTANCE }));
 app.get("/metrics", (_req, res) => res.json({
-  instance: INSTANCE, processed, errors, alertsRaised, msgsPerSec, bufferDepth: buffer.length,
+  instance: INSTANCE, processed, errors, msgsPerSec, bufferDepth: buffer.length,
 }));
 // Prometheus-style text too, in case the dashboard/experiments prefer scraping.
 app.get("/metrics.txt", (_req, res) => {
   res.type("text/plain").send(
-    `ingest_processed_total ${processed}\ningest_msgs_per_sec ${msgsPerSec}\ningest_errors_total ${errors}\ningest_alerts_total ${alertsRaised}\n`,
+    `ingest_processed_total ${processed}\ningest_msgs_per_sec ${msgsPerSec}\ningest_errors_total ${errors}\n`,
   );
 });
 app.listen(PORT, () => console.log(`[ingest ${INSTANCE}] metrics on :${PORT}`));

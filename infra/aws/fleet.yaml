@@ -17,7 +17,7 @@ Parameters:
   DispatchSecretArn: { Type: String, Description: "fleet/svc-dispatch (cert, key)" }
   MaxTasks: { Type: Number, Default: 4 }
   DispatchBacklogPerTask: { Type: Number, Default: 20, Description: Target SQS messages visible per dispatch task. }
-  IngestMsgsPerTask: { Type: Number, Default: 40, Description: Target telemetry msgs/sec per ingest task. }
+  IngestMsgsPerTask: { Type: Number, Default: 20, Description: "Target telemetry msgs/sec per ingest task (20 keeps peak load within Atlas M0 ops limits)." }
 
 Resources:
   # --- network -------------------------------------------------------------------------------------
@@ -84,6 +84,22 @@ Resources:
   IngestLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
   DispatchLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
   DashboardLogs: { Type: AWS::Logs::LogGroup, Properties: { RetentionInDays: 7 } }
+
+  # --- alerting: the broker filters, Node-RED decides ---------------------------------------------
+  # IoT Core rule selects only the telemetry that could raise an alert and republishes it, so the
+  # Node-RED (run locally, not on ECS) sees a small fraction of the stream however large the fleet grows.
+  AlertCandidatesRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      TopicRulePayload:
+        Sql: "SELECT * FROM 'fleet/telemetry/+' WHERE soc < 15 OR status = 'fault'"
+        AwsIotSqlVersion: "2016-03-23"
+        RuleDisabled: false
+        Actions:
+          - Republish:
+              Topic: "fleet/alert-candidates/${topic(3)}"
+              Qos: 0
+              RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
 
   # --- ECS -----------------------------------------------------------------------------------------
   Cluster:

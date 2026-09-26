@@ -56,23 +56,31 @@ class Vehicle {
     this.soc = rnd(20, 100); // %
     this.status = "available"; // available | busy | charging | fault
     this.faults = [];
+    this.chargeAt = null; // [lon, lat] of the station the charge scheduler assigned
     this.lastSent = null; // last published {lat, lon, soc}
     this.lastHeartbeat = 0;
   }
 
   // Advance one tick: move along heading, drain battery, maybe fault.
   step() {
-    if (Math.random() < 0.1) this.heading += rnd(-0.6, 0.6);  // occasional turn
+    if (this.chargeAt) {
+      // Sent to a station by the charge scheduler: steer straight at it and charge on arrival.
+      const [lon, lat] = this.chargeAt;
+      this.heading = Math.atan2((lon - this.lon) * Math.cos((this.lat * Math.PI) / 180), lat - this.lat);
+      this.speed = 40;
+      if (haversineM(this, { lat, lon }) < 50) { this.status = "charging"; this.chargeAt = null; }
+    } else if (Math.random() < 0.1) this.heading += rnd(-0.6, 0.6);  // occasional turn
     const metres = (this.speed * 1000 / 3600) * (RATE_MS / 1000);
     this.lat += (metres * Math.cos(this.heading)) / METERS_PER_DEG;
     this.lon += (metres * Math.sin(this.heading)) / (METERS_PER_DEG * Math.cos((this.lat * Math.PI) / 180));
-    this.speed = Math.max(0, Math.min(60, this.speed + rnd(-5, 5)));
+    if (!this.chargeAt) this.speed = Math.max(0, Math.min(60, this.speed + rnd(-5, 5)));
 
-    // Battery: below 15% the vehicle flips itself to "charging" (leaves the matching pool),
-    // recharges, and rejoins as "available" above 80%.
+    // Battery: below 15% the vehicle's telemetry triggers the charge scheduler (IoT rule -> Node-RED),
+    // which sends it to a station. Dispatch already ignores it (SOC <= 15). If no command arrives it
+    // charges where it stands below 5%. Charging leaves the matching pool until above 80%.
     this.soc = Math.max(0, this.soc - rnd(0, 0.05));
-    if (this.status !== "charging" && this.soc < 15) this.status = "charging";
-    if (this.status === "charging") this.soc = Math.min(100, this.soc + 0.5);
+    if (this.status !== "charging" && !this.chargeAt && this.soc < 5) this.status = "charging";
+    if (this.status === "charging") { this.speed = 0; this.soc = Math.min(100, this.soc + 0.5); }
     if (this.status === "charging" && this.soc > 80) this.status = "available";
 
     // Rare transient fault, clears on its own.
@@ -130,6 +138,12 @@ for (const v of vehicles) {
     reconnectPeriod: 2000,
   });
   v.client.on("error", (e) => console.error(`[sim] ${v.id} error: ${e.message}`));
+  // Commands for this vehicle only (the vehicle policy scopes subscribe to its own topic).
+  v.client.on("connect", () => v.client.subscribe(`fleet/dispatch/${v.id}`));
+  v.client.on("message", (_topic, raw) => {
+    let c; try { c = JSON.parse(raw); } catch { return; }
+    if (c.command === "go_charge" && v.status !== "charging") v.chargeAt = c.location.coordinates;
+  });
 }
 
 let ticks = 0, generated = 0, published = 0, bytes = 0;

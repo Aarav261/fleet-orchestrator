@@ -17,7 +17,8 @@
         "arn:aws:iot:us-east-1:203377390456:topicfilter/$share/ingest/fleet/telemetry/*",
         "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/telemetry/*",
         "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/dispatch/*",
-        "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/alerts/*"
+        "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/alerts/*",
+        "arn:aws:iot:us-east-1:203377390456:topicfilter/fleet/alert-candidates/*"
       ]
     },
     {
@@ -26,7 +27,8 @@
       "Resource": [
         "arn:aws:iot:us-east-1:203377390456:topic/fleet/telemetry/*",
         "arn:aws:iot:us-east-1:203377390456:topic/fleet/dispatch/*",
-        "arn:aws:iot:us-east-1:203377390456:topic/fleet/alerts/*"
+        "arn:aws:iot:us-east-1:203377390456:topic/fleet/alerts/*",
+        "arn:aws:iot:us-east-1:203377390456:topic/fleet/alert-candidates/*"
       ]
     },
     {
