@@ -1,0 +1,38 @@
+[
+ {
+  "start": "2026-09-27T12:31:20.710000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 3.",
+  "cause": "minimum capacity was set to 3"
+ },
+ {
+  "start": "2026-09-27T12:26:58.311000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 4.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmHigh-aa5ebd50-29d6-4eb1-b623-cbf0c28e5065 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-27T12:07:12.662000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 3.",
+  "cause": "minimum capacity was set to 3"
+ },
+ {
+  "start": "2026-09-27T12:02:58.318000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 4.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmHigh-aa5ebd50-29d6-4eb1-b623-cbf0c28e5065 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-27T11:54:40.401000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 1.",
+  "cause": "monitor alarm TargetTracking-service/fleet-Cluster-7IO7aLpv8TEI/fleet-DispatchService-B86YKoFJ0smm-AlarmLow-c2147cf8-160a-44b5-9e60-d326d4708173 in state ALARM triggered policy dispatch-backlog-per-task"
+ },
+ {
+  "start": "2026-09-27T11:53:19.086000+10:00",
+  "status": "Successful",
+  "description": "Setting desired count to 2.",
+  "cause": "minimum capacity was set to 2"
+ }
+]

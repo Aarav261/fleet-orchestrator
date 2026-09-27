@@ -17,6 +17,9 @@ Parameters:
   DispatchSecretArn: { Type: String, Description: "fleet/svc-dispatch (cert, key)" }
   MaxTasks: { Type: Number, Default: 4 }
   DispatchBacklogPerTask: { Type: Number, Default: 20, Description: Target SQS messages visible per dispatch task. }
+  PredictPeriodMin: { Type: Number, Default: 12, Description: Demand cycle length the predictor assumes (experiments/predict-run.js uses 12). }
+  PredictLeadMin: { Type: Number, Default: 2, Description: How far ahead to provision (~ Fargate task start time + 1 tick). }
+  DispatchRpsPerTask: { Type: Number, Default: 6, Description: "Requests/sec one dispatch task sustains (~7.5 measured; 6 leaves headroom)." }
   IngestMsgsPerTask: { Type: Number, Default: 20, Description: "Target telemetry msgs/sec per ingest task (20 keeps peak load within Atlas M0 ops limits)." }
 
 Resources:
@@ -258,6 +261,64 @@ Resources:
               Expression: backlog / tasks
               ReturnData: true
 
+  # Predictive (proactive) scaling for dispatch: a hybrid on top of the reactive policy above. Every
+  # minute the predictor forecasts rider demand LEAD minutes ahead with a seasonal-naive model (demand
+  # at now + LEAD = demand one period ago, read back from CloudWatch, so the function is stateless) and
+  # raises the scalable target's MinCapacity to the tasks that demand needs. Target tracking still
+  # scales out above the floor and owns scale-in. The rule starts DISABLED; the experiment toggles it.
+  PredictorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 30
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Environment:
+        Variables:
+          RESOURCE_ID: !Sub service/${Cluster}/${DispatchService.Name}
+          QUEUE_NAME: !GetAtt RiderQueue.QueueName
+          PERIOD_MIN: !Ref PredictPeriodMin
+          LEAD_MIN: !Ref PredictLeadMin
+          PER_TASK_RPS: !Ref DispatchRpsPerTask
+          MAX_TASKS: !Ref MaxTasks
+      Code:
+        ZipFile: |
+          const { ApplicationAutoScalingClient, RegisterScalableTargetCommand } = require("@aws-sdk/client-application-auto-scaling");
+          const { CloudWatchClient, GetMetricDataCommand } = require("@aws-sdk/client-cloudwatch");
+          const aas = new ApplicationAutoScalingClient({}), cw = new CloudWatchClient({});
+          const { RESOURCE_ID, QUEUE_NAME, PERIOD_MIN, LEAD_MIN, PER_TASK_RPS, MAX_TASKS } = process.env;
+          const MIN = 60_000;
+          exports.handler = async () => {
+            const now = Date.now();
+            // Seasonal naive: the window [now, now + LEAD] one period ago, at 1-min resolution.
+            const start = new Date(Math.floor((now - PERIOD_MIN * MIN) / MIN) * MIN);
+            const end = new Date(start.getTime() + (+LEAD_MIN + 1) * MIN);
+            const r = await cw.send(new GetMetricDataCommand({ StartTime: start, EndTime: end, MetricDataQueries: [{ Id: "sent",
+              MetricStat: { Metric: { Namespace: "AWS/SQS", MetricName: "NumberOfMessagesSent",
+                Dimensions: [{ Name: "QueueName", Value: QUEUE_NAME }] }, Period: 60, Stat: "Sum" } }] }));
+            const rps = Math.max(0, ...r.MetricDataResults[0].Values) / 60; // busiest minute in the window
+            const tasks = Math.min(+MAX_TASKS, Math.max(1, Math.ceil(rps / PER_TASK_RPS)));
+            await aas.send(new RegisterScalableTargetCommand({ ServiceNamespace: "ecs",
+              ScalableDimension: "ecs:service:DesiredCount", ResourceId: RESOURCE_ID, MinCapacity: tasks }));
+            // EMF line -> Fleet/PredictedRps and Fleet/PredictedMinTasks, for the report graphs
+            console.log(JSON.stringify({ _aws: { Timestamp: now, CloudWatchMetrics: [{ Namespace: "Fleet", Dimensions: [["Service"]],
+              Metrics: [{ Name: "PredictedRps" }, { Name: "PredictedMinTasks" }] }] }, Service: "dispatch", PredictedRps: rps, PredictedMinTasks: tasks }));
+            return { rps, tasks };
+          };
+  PredictorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      State: DISABLED
+      Targets: [{ Id: predictor, Arn: !GetAtt PredictorFunction.Arn }]
+  PredictorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PredictorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PredictorSchedule.Arn
+
   # Ingest scales on fleet size: average telemetry msgs/sec per task, emitted by ingest as an EMF log
   # line (Fleet/IngestMsgsPerSec). The shared subscription splits messages across tasks, so adding a
   # task lowers the per-task rate and the policy converges.
@@ -290,3 +351,5 @@ Outputs:
   RiderApi: { Value: !Sub "http://${Alb.DNSName}/requests" }
   ClusterName: { Value: !Ref Cluster }
   RiderQueueName: { Value: !GetAtt RiderQueue.QueueName }
+  PredictorFunction: { Value: !Ref PredictorFunction }
+  PredictorRule: { Value: !Ref PredictorSchedule }
